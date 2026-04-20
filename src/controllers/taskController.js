@@ -5,6 +5,40 @@ import { toUtcDayString, startOfUtcDay } from '../utils/date.js';
 
 const TASK_TYPES = ['one-time', 'daily'];
 
+const recalculateDailyStreak = (completionDates = []) => {
+  if (completionDates.length === 0) {
+    return {
+      streak: 0,
+      lastCompletedDate: null,
+      completionDates: [],
+    };
+  }
+
+  const normalizedDates = completionDates
+    .map((date) => startOfUtcDay(date))
+    .sort((a, b) => a.getTime() - b.getTime());
+
+  const uniqueDates = normalizedDates.filter(
+    (date, index, collection) => index === 0 || toUtcDayString(date) !== toUtcDayString(collection[index - 1])
+  );
+
+  const lastCompletedDate = uniqueDates[uniqueDates.length - 1];
+  const completedKeys = new Set(uniqueDates.map((date) => toUtcDayString(date)));
+  const cursor = new Date(lastCompletedDate);
+  let streak = 0;
+
+  while (completedKeys.has(toUtcDayString(cursor))) {
+    streak += 1;
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
+  }
+
+  return {
+    streak,
+    lastCompletedDate,
+    completionDates: uniqueDates,
+  };
+};
+
 const toClientTask = (task, todayKey = toUtcDayString()) => {
   const taskObject = task.toObject ? task.toObject() : task;
 
@@ -174,6 +208,41 @@ const completeOneTimeTask = async (req, res, next) => {
   }
 };
 
+const uncompleteOneTimeTask = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid task id.' });
+    }
+
+    const task = await Task.findOne({ _id: id, user: req.userId });
+
+    if (!task) {
+      return res.status(404).json({ message: 'Task not found.' });
+    }
+
+    if (task.type !== 'one-time') {
+      return res.status(400).json({ message: 'Use daily-uncomplete endpoint for daily tasks.' });
+    }
+
+    if (!task.completed) {
+      return res.status(400).json({ message: 'Task is already unmarked.' });
+    }
+
+    task.completed = false;
+    task.completedAt = null;
+    await task.save();
+
+    return res.status(200).json({
+      message: 'Task unmarked successfully.',
+      task: toClientTask(task),
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 const completeDailyTask = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -216,6 +285,50 @@ const completeDailyTask = async (req, res, next) => {
 
     return res.status(200).json({
       message: 'Daily task completed for today.',
+      task: toClientTask(task, todayKey),
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const uncompleteDailyTask = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid task id.' });
+    }
+
+    const task = await Task.findOne({ _id: id, user: req.userId });
+
+    if (!task) {
+      return res.status(404).json({ message: 'Task not found.' });
+    }
+
+    if (task.type !== 'daily') {
+      return res.status(400).json({ message: 'Use uncomplete endpoint for one-time tasks.' });
+    }
+
+    const todayKey = toUtcDayString();
+    const completedToday = task.completionDates.some((date) => toUtcDayString(date) === todayKey);
+
+    if (!completedToday) {
+      return res.status(400).json({ message: 'Daily task is already unmarked for today.' });
+    }
+
+    task.completionDates = task.completionDates.filter((date) => toUtcDayString(date) !== todayKey);
+
+    const { streak, lastCompletedDate, completionDates } = recalculateDailyStreak(task.completionDates);
+
+    task.streak = streak;
+    task.lastCompletedDate = lastCompletedDate;
+    task.completionDates = completionDates;
+
+    await task.save();
+
+    return res.status(200).json({
+      message: 'Daily task unmarked for today.',
       task: toClientTask(task, todayKey),
     });
   } catch (error) {
@@ -286,5 +399,7 @@ export {
   getCompletedHistory,
   getTasks,
   reorderTasks,
+  uncompleteDailyTask,
+  uncompleteOneTimeTask,
   updateTask,
 };
